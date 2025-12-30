@@ -188,6 +188,36 @@ class FeatureScaler:
         
         return X_scaled
     
+    def inverse_transform(self, X_scaled):
+        """
+        Inverse scale features back to original scale
+        
+        Args:
+            X_scaled: (n_samples, n_features) or (n_features,)
+        
+        Returns:
+            X: features in original scale
+        """
+        if not self.is_fitted:
+            raise ValueError("Scaler not fitted. Call fit() first.")
+        
+        X_scaled = np.array(X_scaled, dtype=np.float32)
+        original_shape = X_scaled.shape
+        
+        if X_scaled.ndim == 1:
+            X_scaled = X_scaled.reshape(1, -1)
+        
+        if self.scaling_type == 'minmax':
+            X = X_scaled * (self.maxs - self.mins + 1e-8) + self.mins
+        elif self.scaling_type == 'standard':
+            X = X_scaled * (self.stds + 1e-8) + self.means
+        
+        # Restore original shape
+        if len(original_shape) == 1:
+            X = X.flatten()
+        
+        return X
+    
     def fit_transform(self, X):
         """Fit and transform in one step"""
         return self.fit(X).transform(X)
@@ -416,7 +446,7 @@ class OnlineLearningPipeline:
         
         Args:
             features: (n_features,) array
-            target: scalar value
+            target: scalar value (UNSCALED)
             train: whether to train on this step
             batch_size: batch size for training
             use_priority: use prioritized replay
