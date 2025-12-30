@@ -121,6 +121,7 @@ def prepare_sequences(df, pipeline):
     
     print(f"Feature matrix shape: {X.shape}")
     print(f"Target shape: {y.shape}")
+    print(f"Target range: [{y.min():.2f}, {y.max():.2f}]")
     print(f"Selected {len(feature_cols)} features (excluded OHLCV)")
     
     # Create sequences
@@ -150,7 +151,7 @@ def prepare_sequences(df, pipeline):
     return X_train, y_train, X_val, y_val, X_test, y_test, feature_cols
 
 
-def initialize_pipeline(X_train, device):
+def initialize_pipeline(X_train, y_train, device):
     """Initialize online learning pipeline"""
     print("\n[STEP 6] Initializing online learning pipeline...")
     
@@ -170,9 +171,9 @@ def initialize_pipeline(X_train, device):
         device=device
     )
     
-    # Initialize with flattened training data
+    # Initialize with flattened training data AND targets
     X_flat = X_train.reshape(-1, input_size)
-    pipeline.initialize(X_flat)
+    pipeline.initialize(X_flat, y_train)  # CRITICAL: Pass targets!
     print("Pipeline initialized")
     
     return pipeline
@@ -198,7 +199,7 @@ def pretrain_model(pipeline, X_train, y_train):
         volatility = np.std(sequence)
         priority = 1.0 + volatility
         
-        # Add to replay buffer
+        # Add to replay buffer (unscaled target - pipeline will scale it)
         pipeline.replay_buffer.add(sequence, float(target), priority=priority)
     
     print(f"Buffer size: {len(pipeline.replay_buffer)}")
@@ -237,7 +238,7 @@ def validate_model(pipeline, X_val, y_val, device):
     with torch.no_grad():
         for i in range(len(X_val)):
             sequence = X_val[i]
-            pred = pipeline.trainer.predict(sequence)
+            pred = pipeline.predict_next(sequence)
             predictions.append(pred)
     
     predictions = np.array(predictions)
@@ -247,6 +248,8 @@ def validate_model(pipeline, X_val, y_val, device):
     metrics = MetricsCalculator.calculate_all_metrics(y_val, predictions)
     
     print("\nValidation Metrics:")
+    print(f"  Actual range: [{y_val.min():.2f}, {y_val.max():.2f}]")
+    print(f"  Predicted range: [{predictions.min():.2f}, {predictions.max():.2f}]")
     for metric_name, value in metrics.items():
         if metric_name == 'mape':
             print(f"  {metric_name.upper()}: {value:.2f}%")
@@ -271,7 +274,7 @@ def online_learning_simulation(pipeline, X_test, y_test):
         target = y_test[i]
         
         # Predict
-        pred = pipeline.trainer.predict(sequence)
+        pred = pipeline.predict_next(sequence)
         online_predictions.append(pred)
         online_y_true.append(float(target))
         
@@ -307,6 +310,8 @@ def evaluate_online_learning(y_true, predictions):
     metrics = MetricsCalculator.calculate_all_metrics(y_true, predictions)
     
     print("\nOnline Learning Metrics:")
+    print(f"  Actual range: [{y_true.min():.2f}, {y_true.max():.2f}]")
+    print(f"  Predicted range: [{predictions.min():.2f}, {predictions.max():.2f}]")
     for metric_name, value in metrics.items():
         if metric_name == 'mape':
             print(f"  {metric_name.upper()}: {value:.2f}%")
@@ -342,7 +347,7 @@ def main():
     X_train, y_train, X_val, y_val, X_test, y_test, feature_cols = prepare_sequences(df, data_pipeline)
     
     # Model initialization and training
-    pipeline = initialize_pipeline(X_train, device)
+    pipeline = initialize_pipeline(X_train, y_train, device)
     training_losses = pretrain_model(pipeline, X_train, y_train)
     
     # Validation
