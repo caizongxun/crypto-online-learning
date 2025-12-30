@@ -495,23 +495,19 @@ class OnlineLearningPipeline:
         Returns the UNSCALED prediction
         
         Args:
-            features: (n_features,) array
+            features: (seq_len, n_features) array OR (n_features,) array
         
         Returns:
             prediction: scalar value (in original scale)
         """
-        # Ensure features is 1D
-        features = np.array(features, dtype=np.float32).flatten()
+        # Handle both sequence and single feature vector input
+        features = np.array(features, dtype=np.float32)
         
-        # Scale features
-        features_scaled = self.scaler.transform(features)
-        
-        # Add to state buffer
-        self.state_buffer.append(features_scaled)
-        
-        # If we have a full sequence, predict
-        if len(self.state_buffer) == self.sequence_length:
-            sequence = np.array(list(self.state_buffer), dtype=np.float32)
+        # If features is a 2D sequence, use it directly
+        if features.ndim == 2:
+            # This is a (seq_len, n_features) sequence from validation/test
+            sequence = features
+            # The sequence is already in the correct shape, use it directly
             prediction_scaled = self.trainer.predict(sequence)
             
             # CRITICAL: Inverse transform to get original scale!
@@ -519,8 +515,30 @@ class OnlineLearningPipeline:
                 np.array([[prediction_scaled]]))[0, 0]
             
             return prediction_original
+        
         else:
-            return None
+            # This is a single feature vector (n_features,)
+            # For online learning flow, flatten and add to state buffer
+            features = features.flatten()
+            
+            # Scale features
+            features_scaled = self.scaler.transform(features)
+            
+            # Add to state buffer
+            self.state_buffer.append(features_scaled)
+            
+            # If we have a full sequence, predict
+            if len(self.state_buffer) == self.sequence_length:
+                sequence = np.array(list(self.state_buffer), dtype=np.float32)
+                prediction_scaled = self.trainer.predict(sequence)
+                
+                # CRITICAL: Inverse transform to get original scale!
+                prediction_original = self.target_scaler.inverse_transform(
+                    np.array([[prediction_scaled]]))[0, 0]
+                
+                return prediction_original
+            else:
+                return None
     
     def save(self, filepath):
         """Save entire pipeline"""
