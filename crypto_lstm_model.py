@@ -85,6 +85,9 @@ class ReplayBuffer:
         Returns:
             List of (sequence, target) tuples
         """
+        if len(self.buffer) == 0:
+            return []
+        
         if use_priority and len(self.buffer) > 0:
             # Prioritized sampling
             priorities = np.array(list(self.priorities), dtype=np.float32)
@@ -243,7 +246,7 @@ class OnlineLearningTrainer:
         Args:
             batch: list of (sequence, target) tuples
                    sequence shape: (seq_len, input_size)
-                   target: scalar
+                   target: scalar (already scaled)
         
         Returns:
             loss: scalar loss value
@@ -379,6 +382,7 @@ class OnlineLearningPipeline:
         
         self.trainer = OnlineLearningTrainer(self.model, learning_rate=learning_rate, device=device)
         self.scaler = FeatureScaler(scaling_type='minmax')
+        self.target_scaler = FeatureScaler(scaling_type='minmax')  # CRITICAL: Scale targets too!
         self.replay_buffer = ReplayBuffer(capacity=buffer_capacity)
         
         # State buffer for maintaining sequences
@@ -387,18 +391,24 @@ class OnlineLearningPipeline:
         self.is_initialized = False
         self.update_count = 0
     
-    def initialize(self, initial_data):
+    def initialize(self, initial_data, initial_targets):
         """
         Initialize pipeline with historical data
         
         Args:
             initial_data: (n_samples, n_features) array
+            initial_targets: (n_samples,) array of target values
         """
-        # Fit scaler
+        # Fit feature scaler
         self.scaler.fit(initial_data)
+        
+        # CRITICAL: Also fit target scaler!
+        self.target_scaler.fit(initial_targets.reshape(-1, 1))
         
         self.is_initialized = True
         print(f"Pipeline initialized with {len(initial_data)} samples")
+        print(f"Feature range: [{self.scaler.mins.min():.2f}, {self.scaler.maxs.max():.2f}]")
+        print(f"Target range: [{self.target_scaler.mins[0]:.2f}, {self.target_scaler.maxs[0]:.2f}]")
     
     def add_data(self, features, target, train=True, batch_size=32, use_priority=True):
         """
@@ -423,6 +433,9 @@ class OnlineLearningPipeline:
         # Scale features
         features_scaled = self.scaler.transform(features)
         
+        # CRITICAL: Also scale the target!
+        target_scaled = self.target_scaler.transform(np.array([[target]]))[0, 0]
+        
         # Add to state buffer
         self.state_buffer.append(features_scaled)
         
@@ -434,8 +447,8 @@ class OnlineLearningPipeline:
             volatility = np.std(sequence)
             priority = 1.0 + volatility
             
-            # Add to replay buffer
-            self.replay_buffer.add(sequence, float(target), priority=priority)
+            # Add to replay buffer (with scaled target!)
+            self.replay_buffer.add(sequence, target_scaled, priority=priority)
         
         # Train if requested
         loss = None
@@ -449,12 +462,13 @@ class OnlineLearningPipeline:
     def predict_next(self, features):
         """
         Predict next value given current features
+        Returns the UNSCALED prediction
         
         Args:
             features: (n_features,) array
         
         Returns:
-            prediction: scalar
+            prediction: scalar value (in original scale)
         """
         # Ensure features is 1D
         features = np.array(features, dtype=np.float32).flatten()
@@ -468,8 +482,13 @@ class OnlineLearningPipeline:
         # If we have a full sequence, predict
         if len(self.state_buffer) == self.sequence_length:
             sequence = np.array(list(self.state_buffer), dtype=np.float32)
-            prediction = self.trainer.predict(sequence)
-            return prediction
+            prediction_scaled = self.trainer.predict(sequence)
+            
+            # CRITICAL: Inverse transform to get original scale!
+            prediction_original = self.target_scaler.inverse_transform(
+                np.array([[prediction_scaled]]))[0, 0]
+            
+            return prediction_original
         else:
             return None
     
@@ -486,6 +505,13 @@ class OnlineLearningPipeline:
                 'means': self.scaler.means,
                 'stds': self.scaler.stds,
                 'type': self.scaler.scaling_type
+            },
+            'target_scaler_params': {
+                'mins': self.target_scaler.mins,
+                'maxs': self.target_scaler.maxs,
+                'means': self.target_scaler.means,
+                'stds': self.target_scaler.stds,
+                'type': self.target_scaler.scaling_type
             },
             'config': {
                 'input_size': self.input_size,
@@ -509,6 +535,13 @@ class OnlineLearningPipeline:
         self.scaler.stds = checkpoint['scaler_params']['stds']
         self.scaler.scaling_type = checkpoint['scaler_params']['type']
         self.scaler.is_fitted = True
+        
+        self.target_scaler.mins = checkpoint['target_scaler_params']['mins']
+        self.target_scaler.maxs = checkpoint['target_scaler_params']['maxs']
+        self.target_scaler.means = checkpoint['target_scaler_params']['means']
+        self.target_scaler.stds = checkpoint['target_scaler_params']['stds']
+        self.target_scaler.scaling_type = checkpoint['target_scaler_params']['type']
+        self.target_scaler.is_fitted = True
         
         self.is_initialized = True
         print(f"Pipeline loaded from {filepath}")
