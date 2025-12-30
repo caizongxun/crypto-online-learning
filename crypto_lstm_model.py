@@ -50,24 +50,29 @@ class CryptoLSTMModel(nn.Module):
 class ReplayBuffer:
     """
     Experience Replay Buffer for Online Learning
-    Stores (state, target) pairs and samples them for training
+    Stores (sequence, target) pairs and samples them for training
     """
     def __init__(self, capacity=10000):
         self.capacity = capacity
         self.buffer = deque(maxlen=capacity)
         self.priorities = deque(maxlen=capacity)  # For prioritized replay
     
-    def add(self, state, target, priority=1.0):
+    def add(self, sequence, target, priority=1.0):
         """
         Add experience to buffer
         
         Args:
-            state: input features (seq_len, input_size)
+            sequence: input sequence (seq_len, input_size) - the full sequence
             target: target value (scalar)
             priority: importance weight (higher = more likely to be sampled)
         """
-        self.buffer.append((state, target))
-        self.priorities.append(priority)
+        # Ensure sequence is 2D (seq_len, features)
+        sequence = np.array(sequence, dtype=np.float32)
+        if sequence.ndim == 1:
+            sequence = sequence.reshape(1, -1)
+        
+        self.buffer.append((sequence, float(target)))
+        self.priorities.append(float(priority))
     
     def sample(self, batch_size=32, use_priority=True):
         """
@@ -78,12 +83,12 @@ class ReplayBuffer:
             use_priority: if True, use prioritized sampling
         
         Returns:
-            List of (state, target) tuples
+            List of (sequence, target) tuples
         """
         if use_priority and len(self.buffer) > 0:
             # Prioritized sampling
             priorities = np.array(list(self.priorities), dtype=np.float32)
-            priorities = priorities / priorities.sum()
+            priorities = priorities / (priorities.sum() + 1e-8)
             
             indices = np.random.choice(
                 len(self.buffer),
@@ -132,6 +137,10 @@ class FeatureScaler:
         Args:
             X: (n_samples, n_features)
         """
+        X = np.array(X, dtype=np.float32)
+        if X.ndim == 1:
+            X = X.reshape(-1, 1)
+        
         if self.scaling_type == 'minmax':
             self.mins = np.min(X, axis=0)
             self.maxs = np.max(X, axis=0)
@@ -151,7 +160,7 @@ class FeatureScaler:
         Scale features
         
         Args:
-            X: (n_samples, n_features)
+            X: (n_samples, n_features) or (n_features,)
         
         Returns:
             X_scaled: scaled features
@@ -160,11 +169,19 @@ class FeatureScaler:
             raise ValueError("Scaler not fitted. Call fit() first.")
         
         X = np.array(X, dtype=np.float32)
+        original_shape = X.shape
+        
+        if X.ndim == 1:
+            X = X.reshape(1, -1)
         
         if self.scaling_type == 'minmax':
-            X_scaled = (X - self.mins) / (self.maxs - self.mins)
+            X_scaled = (X - self.mins) / (self.maxs - self.mins + 1e-8)
         elif self.scaling_type == 'standard':
-            X_scaled = (X - self.means) / self.stds
+            X_scaled = (X - self.means) / (self.stds + 1e-8)
+        
+        # Restore original shape
+        if len(original_shape) == 1:
+            X_scaled = X_scaled.flatten()
         
         return X_scaled
     
@@ -178,13 +195,15 @@ class FeatureScaler:
         Dynamically adjust min/max or mean/std
         
         Args:
-            X: new data batch (n_samples, n_features)
+            X: new data batch (n_samples, n_features) or (n_features,)
         """
         if not self.is_fitted:
             self.fit(X)
             return
         
         X = np.array(X, dtype=np.float32)
+        if X.ndim == 1:
+            X = X.reshape(1, -1)
         
         if self.scaling_type == 'minmax':
             # Update mins and maxs
@@ -192,10 +211,6 @@ class FeatureScaler:
             self.maxs = np.maximum(self.maxs, np.max(X, axis=0))
             # Avoid division by zero
             self.maxs = np.where(self.maxs == self.mins, 1.0, self.maxs)
-        elif self.scaling_type == 'standard':
-            # Running mean and std update
-            # Simplified: recalculate from recent window
-            pass
 
 
 class OnlineLearningTrainer:
@@ -226,7 +241,9 @@ class OnlineLearningTrainer:
         Single training step
         
         Args:
-            batch: list of (state, target) tuples
+            batch: list of (sequence, target) tuples
+                   sequence shape: (seq_len, input_size)
+                   target: scalar
         
         Returns:
             loss: scalar loss value
@@ -234,57 +251,85 @@ class OnlineLearningTrainer:
         if len(batch) == 0:
             return None
         
-        # Convert to tensors
-        states = torch.stack([torch.FloatTensor(state) for state, _ in batch]).to(self.device)
-        targets = torch.FloatTensor([target for _, target in batch]).unsqueeze(1).to(self.device)
+        try:
+            # Convert to tensors
+            sequences = []
+            targets = []
+            
+            for seq, target in batch:
+                seq = np.array(seq, dtype=np.float32)
+                # Ensure sequence is 2D (seq_len, features)
+                if seq.ndim == 1:
+                    seq = seq.reshape(1, -1)
+                sequences.append(seq)
+                targets.append(float(target))
+            
+            # Stack sequences
+            X = np.stack(sequences)  # (batch_size, seq_len, features)
+            y = np.array(targets).reshape(-1, 1)  # (batch_size, 1)
+            
+            X_tensor = torch.FloatTensor(X).to(self.device)
+            y_tensor = torch.FloatTensor(y).to(self.device)
+            
+            # Forward pass
+            predictions = self.model(X_tensor)
+            loss = self.loss_fn(predictions, y_tensor)
+            
+            # Backward pass
+            self.optimizer.zero_grad()
+            loss.backward()
+            
+            # Gradient clipping to prevent explosion
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+            
+            self.optimizer.step()
+            
+            return loss.item()
         
-        # Forward pass
-        predictions = self.model(states)
-        loss = self.loss_fn(predictions, targets)
-        
-        # Backward pass
-        self.optimizer.zero_grad()
-        loss.backward()
-        
-        # Gradient clipping to prevent explosion
-        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-        
-        self.optimizer.step()
-        
-        return loss.item()
+        except Exception as e:
+            print(f"Error in train_step: {e}")
+            print(f"Batch size: {len(batch)}")
+            if len(batch) > 0:
+                print(f"First sequence shape: {batch[0][0].shape}")
+            raise
     
-    def predict(self, state):
+    def predict(self, sequence):
         """
-        Make prediction on single state
+        Make prediction on single sequence
         
         Args:
-            state: (seq_len, input_size)
+            sequence: (seq_len, input_size)
         
         Returns:
             prediction: scalar value
         """
         self.model.eval()
         with torch.no_grad():
-            state_tensor = torch.FloatTensor(state).unsqueeze(0).to(self.device)
-            prediction = self.model(state_tensor).cpu().numpy()[0][0]
+            seq = np.array(sequence, dtype=np.float32)
+            if seq.ndim == 1:
+                seq = seq.reshape(1, -1)
+            
+            seq_tensor = torch.FloatTensor(seq).unsqueeze(0).to(self.device)
+            prediction = self.model(seq_tensor).cpu().numpy()[0][0]
         self.model.train()
         
         return prediction
     
-    def predict_batch(self, states):
+    def predict_batch(self, sequences):
         """
-        Make predictions on batch of states
+        Make predictions on batch of sequences
         
         Args:
-            states: list of (seq_len, input_size) arrays
+            sequences: list of (seq_len, input_size) arrays
         
         Returns:
             predictions: array of predictions
         """
         self.model.eval()
         with torch.no_grad():
-            states_tensor = torch.stack([torch.FloatTensor(state) for state in states]).to(self.device)
-            predictions = self.model(states_tensor).cpu().numpy()
+            X = np.stack([np.array(seq, dtype=np.float32) for seq in sequences])
+            X_tensor = torch.FloatTensor(X).to(self.device)
+            predictions = self.model(X_tensor).cpu().numpy()
         self.model.train()
         
         return predictions
@@ -336,6 +381,9 @@ class OnlineLearningPipeline:
         self.scaler = FeatureScaler(scaling_type='minmax')
         self.replay_buffer = ReplayBuffer(capacity=buffer_capacity)
         
+        # State buffer for maintaining sequences
+        self.state_buffer = deque(maxlen=sequence_length)
+        
         self.is_initialized = False
         self.update_count = 0
     
@@ -369,14 +417,25 @@ class OnlineLearningPipeline:
         if not self.is_initialized:
             raise ValueError("Pipeline not initialized. Call initialize() first.")
         
-        # Scale features
-        features = np.array(features, dtype=np.float32).reshape(1, -1)
-        self.scaler.update(features)
-        features_scaled = self.scaler.transform(features)[0]
+        # Ensure features is 1D
+        features = np.array(features, dtype=np.float32).flatten()
         
-        # Add to replay buffer
-        # Note: In real use, you'd maintain a sliding window of features
-        self.replay_buffer.add(features_scaled, float(target))
+        # Scale features
+        features_scaled = self.scaler.transform(features)
+        
+        # Add to state buffer
+        self.state_buffer.append(features_scaled)
+        
+        # If we have enough history, create a sequence and add to replay buffer
+        if len(self.state_buffer) == self.sequence_length:
+            sequence = np.array(list(self.state_buffer), dtype=np.float32)  # (seq_len, n_features)
+            
+            # Calculate priority based on volatility
+            volatility = np.std(sequence)
+            priority = 1.0 + volatility
+            
+            # Add to replay buffer
+            self.replay_buffer.add(sequence, float(target), priority=priority)
         
         # Train if requested
         loss = None
@@ -389,7 +448,7 @@ class OnlineLearningPipeline:
     
     def predict_next(self, features):
         """
-        Predict next value given features
+        Predict next value given current features
         
         Args:
             features: (n_features,) array
@@ -397,20 +456,25 @@ class OnlineLearningPipeline:
         Returns:
             prediction: scalar
         """
-        features = np.array(features, dtype=np.float32).reshape(1, -1)
-        features_scaled = self.scaler.transform(features)[0]
+        # Ensure features is 1D
+        features = np.array(features, dtype=np.float32).flatten()
         
-        # For single prediction, we need to construct a sequence
-        # This is a simplified version - in practice, maintain a state buffer
-        state = np.expand_dims(features_scaled, axis=0)  # (1, input_size) -> (1, 1, input_size)
+        # Scale features
+        features_scaled = self.scaler.transform(features)
         
-        prediction = self.trainer.predict(state)
-        return prediction
+        # Add to state buffer
+        self.state_buffer.append(features_scaled)
+        
+        # If we have a full sequence, predict
+        if len(self.state_buffer) == self.sequence_length:
+            sequence = np.array(list(self.state_buffer), dtype=np.float32)
+            prediction = self.trainer.predict(sequence)
+            return prediction
+        else:
+            return None
     
     def save(self, filepath):
         """Save entire pipeline"""
-        import pickle
-        
         checkpoint = {
             'model_checkpoint': {
                 'model_state': self.model.state_dict(),
