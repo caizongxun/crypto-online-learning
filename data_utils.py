@@ -142,56 +142,62 @@ class DataPipeline:
         Create comprehensive feature set from OHLCV data
         
         Args:
-            df: DataFrame with columns [Open, High, Low, Close, Volume]
+            df: DataFrame with columns [open, high, low, close, volume] (case-insensitive)
         
         Returns:
             DataFrame with original + technical indicator features
         """
         df = df.copy()
         
+        # Normalize column names to lowercase
+        df.columns = [col.lower() if isinstance(col, str) else col for col in df.columns]
+        
+        # Remove unnecessary columns
+        df = df[['open', 'high', 'low', 'close', 'volume']]
+        
         # Price features
-        df['returns'] = df['Close'].pct_change()
-        df['log_returns'] = np.log(df['Close'] / df['Close'].shift(1))
-        df['high_low_ratio'] = df['High'] / df['Low']
-        df['close_open_ratio'] = df['Close'] / df['Open']
+        df['returns'] = df['close'].pct_change()
+        df['log_returns'] = np.log(df['close'] / df['close'].shift(1))
+        df['high_low_ratio'] = df['high'] / df['low']
+        df['close_open_ratio'] = df['close'] / df['open']
         
         # Volume features
-        df['volume_sma_20'] = df['Volume'].rolling(20).mean()
-        df['volume_ratio'] = df['Volume'] / df['volume_sma_20']
+        df['volume_sma_20'] = df['volume'].rolling(20).mean()
+        df['volume_ratio'] = df['volume'] / (df['volume_sma_20'] + 1e-8)
         
         # Moving averages
-        for period in [5, 10, 20, 50, 100]:
-            df[f'sma_{period}'] = df['Close'].rolling(period).mean()
+        for period in [5, 10, 20, 50]:
+            df[f'sma_{period}'] = df['close'].rolling(period).mean()
             df[f'ema_{period}'] = TechnicalIndicators.exponential_moving_average(
-                df['Close'].values, period
+                df['close'].values, period
             )
         
         # Momentum
         for period in [5, 10, 20]:
-            df[f'momentum_{period}'] = df['Close'] - df['Close'].shift(period)
-            df[f'roc_{period}'] = df['Close'].pct_change(period)
+            df[f'momentum_{period}'] = df['close'] - df['close'].shift(period)
+            df[f'roc_{period}'] = df['close'].pct_change(period)
         
         # RSI
-        df['rsi_7'] = TechnicalIndicators.rsi(df['Close'].values, 7)
-        df['rsi_14'] = TechnicalIndicators.rsi(df['Close'].values, 14)
+        df['rsi_7'] = TechnicalIndicators.rsi(df['close'].values, 7)
+        df['rsi_14'] = TechnicalIndicators.rsi(df['close'].values, 14)
         
         # MACD
-        macd_line, signal_line, histogram = TechnicalIndicators.macd(df['Close'].values)
+        macd_line, signal_line, histogram = TechnicalIndicators.macd(df['close'].values)
         df['macd'] = macd_line
         df['macd_signal'] = signal_line
         df['macd_histogram'] = histogram
         
         # Bollinger Bands
-        upper, middle, lower = TechnicalIndicators.bollinger_bands(df['Close'].values)
+        upper, middle, lower = TechnicalIndicators.bollinger_bands(df['close'].values)
         df['bb_upper'] = upper
         df['bb_middle'] = middle
         df['bb_lower'] = lower
         df['bb_width'] = upper - lower
-        df['bb_position'] = (df['Close'] - lower) / (upper - lower)
+        df['bb_position'] = (df['close'] - lower) / (upper - lower + 1e-8)
         
         # ATR
         df['atr'] = TechnicalIndicators.atr(
-            df['High'].values, df['Low'].values, df['Close'].values
+            df['high'].values, df['low'].values, df['close'].values
         )
         
         # Volatility
@@ -201,14 +207,14 @@ class DataPipeline:
         
         # Stochastic
         k, d = TechnicalIndicators.stochastic(
-            df['High'].values, df['Low'].values, df['Close'].values
+            df['high'].values, df['low'].values, df['close'].values
         )
         df['stochastic_k'] = k
         df['stochastic_d'] = d
         
         # Price position
-        df['price_position_20'] = (df['Close'] - df['Close'].rolling(20).min()) / \
-                                  (df['Close'].rolling(20).max() - df['Close'].rolling(20).min())
+        df['price_position_20'] = (df['close'] - df['close'].rolling(20).min()) / \
+                                  (df['close'].rolling(20).max() - df['close'].rolling(20).min() + 1e-8)
         
         return df
     
@@ -302,7 +308,7 @@ class MetricsCalculator:
     @staticmethod
     def mean_absolute_percentage_error(y_true: np.ndarray, y_pred: np.ndarray) -> float:
         """MAPE"""
-        return np.mean(np.abs((y_true - y_pred) / y_true)) * 100
+        return np.mean(np.abs((y_true - y_pred) / (y_true + 1e-8))) * 100
     
     @staticmethod
     def direction_accuracy(y_true: np.ndarray, y_pred: np.ndarray) -> float:
