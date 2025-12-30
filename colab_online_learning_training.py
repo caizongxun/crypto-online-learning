@@ -81,12 +81,21 @@ def create_features(btc_data):
     from data_utils import DataPipeline
     
     df = btc_data.copy()
+    
+    # CRITICAL: Ensure all columns are lowercase before any processing
+    print(f"Input columns: {list(df.columns)}")
+    df.columns = [str(col).lower() for col in df.columns]
+    print(f"Normalized columns: {list(df.columns)}")
+    
+    # Ensure we have the required columns
+    required_cols = ['open', 'high', 'low', 'close', 'volume']
+    available_cols = list(df.columns)
+    print(f"Required: {required_cols}")
+    print(f"Available: {available_cols}")
+    
     pipeline = DataPipeline(sequence_length=60)
     
-    # Ensure columns are lowercase
-    df.columns = [col.lower() if isinstance(col, str) else col for col in df.columns]
-    
-    # Create features
+    # Create features - this function will normalize columns internally
     df = pipeline.create_features(df)
     
     # Remove NaN rows
