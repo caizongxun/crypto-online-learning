@@ -62,18 +62,14 @@ def download_btc_data():
     
     btc = yf.download('BTC-USD', period='6mo', interval='1h', progress=False)
     
-    # Handle MultiIndex columns from yfinance
-    if isinstance(btc.columns, pd.MultiIndex):
-        # Flatten column names
-        btc.columns = [col[0].lower() if col[1] == '' else col[0].lower() 
-                       for col in btc.columns]
-    else:
-        btc.columns = [col.lower() for col in btc.columns]
+    # Normalize all column names to lowercase
+    btc.columns = [col[0].lower() if isinstance(col, tuple) else col.lower() for col in btc.columns]
     
     print(f"\nDownloaded {len(btc)} candles")
     print(f"Date range: {btc.index[0]} to {btc.index[-1]}")
     print(f"\nFirst few rows:")
     print(btc.head())
+    print(f"\nColumn names: {list(btc.columns)}")
     
     return btc
 
@@ -86,6 +82,9 @@ def create_features(btc_data):
     
     df = btc_data.copy()
     pipeline = DataPipeline(sequence_length=60)
+    
+    # Ensure columns are lowercase
+    df.columns = [col.lower() if isinstance(col, str) else col for col in df.columns]
     
     # Create features
     df = pipeline.create_features(df)
@@ -105,18 +104,15 @@ def prepare_sequences(df, pipeline):
     """Prepare sequences for LSTM"""
     print("\n[STEP 5] Preparing sequences for LSTM...")
     
-    # Select numeric features only
-    feature_cols = df.select_dtypes(include=[np.number]).columns.tolist()
-    
-    # Remove close from features (use as target)
-    if 'close' in feature_cols:
-        feature_cols.remove('close')
+    # Select numeric features only (exclude OHLCV)
+    feature_cols = [col for col in df.columns if col not in ['open', 'high', 'low', 'close', 'volume']]
     
     X = df[feature_cols].values.astype(np.float32)
     y = df['close'].values.astype(np.float32)
     
     print(f"Feature matrix shape: {X.shape}")
     print(f"Target shape: {y.shape}")
+    print(f"Selected {len(feature_cols)} features (excluded OHLCV)")
     
     # Create sequences
     X_seq, y_seq = pipeline.create_sequences(X, y)
